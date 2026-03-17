@@ -15,7 +15,7 @@ OUTPUT_DIR = PROJECT_ROOT / "outputs" / "reports"
 
 
 def _load_env_defaults() -> None:
-    """Load .env values from the wrapper repo root and the project root."""
+    """루트 저장소와 프로젝트 루트의 `.env` 값을 기본값으로 불러옵니다."""
     inherited_keys = set(os.environ)
     env_candidates = [
         PROJECT_ROOT.parent / ".env",
@@ -130,7 +130,7 @@ REQUIRED_SECTIONS = [
 
 # ── LLM 설정 ──
 LLM_MODEL = "gpt-4o"
-LLM_TEMPERATURE = 0.2       # 분석 보고서이므로 낮은 temperature
+LLM_TEMPERATURE = 0.2       # 분석 보고서이므로 낮은 온도값 사용
 
 # ── SWOT 분석 기준 ──
 # 정량 기준

@@ -73,10 +73,10 @@ def generate_balanced_queries(topic: str) -> dict:
 
 def search(query: str, max_results: int = 5) -> list[dict]:
     """
-    Tavily API 웹 검색
+    Tavily API로 웹 검색을 수행합니다.
 
-    Returns:
-        list[dict]: [{title, url, date, snippet}]
+    반환값:
+        [{title, url, date, snippet}] 형태의 목록
     """
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
@@ -127,10 +127,10 @@ def search(query: str, max_results: int = 5) -> list[dict]:
 
 def classify_pro_con(results: list[dict]) -> list[dict]:
     """
-    검색 결과를 찬성/반대/중립으로 분류
+    검색 결과를 찬성/반대/중립으로 분류합니다.
 
-    Returns:
-        각 결과에 pro_con_tag 필드 추가
+    반환값:
+        각 결과에 `pro_con_tag`를 추가한 목록
     """
     classified: list[dict] = []
     for result in results:
@@ -155,11 +155,11 @@ def classify_pro_con(results: list[dict]) -> list[dict]:
 
 def check_bias_ratio(results: list[dict]) -> dict:
     """
-    찬반 비율 확인
+    찬반 비율을 점검합니다.
 
-    Returns:
+    반환값:
         {"pro": int, "con": int, "neutral": int, "is_balanced": bool}
-        is_balanced: 비율이 4:6~6:4 이내이면 True
+        `is_balanced`는 비율이 4:6~6:4 이내일 때 참입니다.
     """
     counts = {"pro": 0, "con": 0, "neutral": 0}
     for result in results:
@@ -187,9 +187,9 @@ def check_bias_ratio(results: list[dict]) -> dict:
 
 def supplement_minority_view(topic: str, current_results: list[dict]) -> list[dict]:
     """
-    편향 비율 > 7:3일 때 소수 관점 보충 검색
+    편향 비율이 7:3을 넘으면 소수 관점을 보충 검색합니다.
 
-    Control Strategy: Conditional Branch (max MAX_WEB_SUPPLEMENT회)
+    제어 전략: 조건부 분기, 최대 `MAX_WEB_SUPPLEMENT`회까지 보강
     """
     results = classify_pro_con(current_results)
     bias = check_bias_ratio(results)

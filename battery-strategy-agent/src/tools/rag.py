@@ -36,7 +36,7 @@ from config.settings import (
 
 
 class SentenceTransformerEmbeddings(Embeddings):
-    """LangChain-compatible embeddings wrapper backed by sentence-transformers."""
+    """`sentence-transformers`를 감싼 LangChain 호환 임베딩 래퍼입니다."""
 
     def __init__(self, model_name: str):
         self.model_name = model_name
@@ -246,7 +246,7 @@ def _table_has_rows(table_name: str) -> bool:
 
 
 def ensure_pgvector_extension() -> None:
-    """Ensure the pgvector extension is installed in the target database."""
+    """대상 데이터베이스에 `pgvector` 확장이 설치되어 있는지 확인합니다."""
     try:
         with _get_sqlalchemy_engine().begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
@@ -255,7 +255,7 @@ def ensure_pgvector_extension() -> None:
 
 
 def check_pgvector_connection() -> dict:
-    """Return a small diagnostic payload for the configured pgvector database."""
+    """현재 설정된 pgvector 데이터베이스의 간단한 진단 정보를 반환합니다."""
     try:
         with _get_sqlalchemy_engine().connect() as conn:
             current_db = conn.execute(text("SELECT current_database()")).scalar_one()
@@ -308,7 +308,7 @@ def load_documents(data_dir: Path = DATA_DIR) -> list[dict]:
         total_pages += page_count
         if total_pages > MAX_DOCUMENT_PAGES:
             raise ValueError(
-                f"Document page budget exceeded: {total_pages} > {MAX_DOCUMENT_PAGES}"
+                f"문서 페이지 예산을 초과했습니다: {total_pages} > {MAX_DOCUMENT_PAGES}"
             )
 
         for page_number, page_text in enumerate(page_texts, start=1):
@@ -379,6 +379,7 @@ def build_pgvector_index(
     except OperationalError as exc:
         raise _raise_pgvector_connection_error(exc) from exc
 
+
 def search(query: str, top_k: int = VECTOR_SEARCH_TOP_K) -> list[dict]:
     """
     pgvector 유사도 검색
@@ -422,8 +423,8 @@ def search(query: str, top_k: int = VECTOR_SEARCH_TOP_K) -> list[dict]:
     if filtered_results:
         return deduplicate(filtered_results)
 
-    # pgvector retrieved nearest neighbors already; when local fallback embeddings
-    # are used, a fixed cosine threshold can be too strict for smoke tests.
+    # pgvector가 이미 최근접 이웃을 골라준 상태이므로, 로컬 해시 임베딩이
+    # 동작할 때는 고정 코사인 임계값이 스모크 테스트에 지나치게 엄격할 수 있습니다.
     return deduplicate(scored_results)
 
 
@@ -462,9 +463,9 @@ def deduplicate(results: list[dict], threshold: float = DUPLICATE_THRESHOLD) -> 
 
 def rewrite_query(original_query: str, previous_results: list[dict]) -> str:
     """
-    Query Rewrite — 관련도가 낮을 때 LLM으로 쿼리 재작성
+    관련도가 낮을 때 쿼리를 다시 쓰기 위한 보조 함수입니다.
 
-    Control Strategy: Loop (max 2회, settings.MAX_QUERY_REWRITE)
+    제어 전략: 최대 2회까지 반복 재작성
     """
     sources = [
         Path(str(result["source"])).stem
