@@ -1,16 +1,16 @@
 """
 기업 분석 Agent
 - LG에너지솔루션·CATL 전략 분석 및 비교 데이터 생성
-- RAG only
+- RAG
 
-Outcome: LG·CATL 각각의 포트폴리오 다각화 전략과 핵심 경쟁력이,
-         과거→현재→미래 시간축을 포함한 비교 데이터와 함께 완성
+Outcome: LG·CATL 각각의 포트폴리오 다각화 전략, 핵심 경쟁력,
+         리스크 요인이 축별 비교 데이터와 함께 완성
 
 Success Criteria:
   - 관련성: 검색 청크 유사도 ≥ 0.65
   - 중복 제거: 코사인 유사도 > 0.95 제거
   - 추적 가능성: 페이지 번호 + 문서명 포함
-  - 시간적 포괄성: 각 기업별 과거/현재/미래 모두 포함
+  - 축별 포괄성: 포트폴리오·지역·공급망·고객·재무 관점 포함
 
 Control Strategy:
   - Loop: Query Rewrite (max 2회)
@@ -47,6 +47,38 @@ _RISK_KEYWORDS = {
     "위험", "리스크", "둔화", "편중", "의존", "적자", "하락", "pressure", "risk",
     "uncertain", "slowdown", "oversupply", "cost", "부채",
 }
+_CORE_COMPETITIVENESS_RULES = {
+    "LG에너지솔루션": [
+        (("북미", "유럽", "ira", "arizona", "poland"), "북미·유럽 현지화와 정책 대응력"),
+        (("ess", "energy storage", "비ev", "non-ev"), "ESS 및 비EV 확장 실행력"),
+        (("lmr", "46시리즈", "원통형", "전고체"), "차세대 제품 로드맵과 기술 개발력"),
+        (("oem", "gm", "tesla", "현대", "ford"), "글로벌 OEM 고객 대응력"),
+        (("리사이클", "내재화", "양극재", "supply chain"), "공급망 연계와 소재 내재화 추진력"),
+        (("cash", "현금", "투자", "capex", "수익"), "투자 지속을 뒷받침하는 재무 운영력"),
+    ],
+    "CATL": [
+        (("동력전지", "动力电池", "대량", "scale"), "동력전지 대량생산과 규모의 경제"),
+        (("저장전지", "ess", "energy storage"), "저장전지 사업 확장과 시스템 통합 역량"),
+        (("리튬", "리사이클", "내재화", "원가", "supply chain"), "원가 경쟁력 기반의 공급망 통합력"),
+        (("중국", "헝가리", "독일", "overseas", "해외"), "중국 기반 우위와 해외 거점 확장력"),
+        (("lfp", "ncm", "나트륨", "chemistry"), "케미스트리 포트폴리오 운용력"),
+        (("oem", "고객", "해외 고객"), "폭넓은 고객 기반과 납품 실행력"),
+    ],
+}
+_CORE_COMPETITIVENESS_DEFAULTS = {
+    "LG에너지솔루션": [
+        "북미·유럽 현지화와 정책 대응력",
+        "ESS 및 비EV 확장 실행력",
+        "차세대 제품 로드맵과 기술 개발력",
+    ],
+    "CATL": [
+        "동력전지 대량생산과 규모의 경제",
+        "저장전지 사업 확장과 시스템 통합 역량",
+        "원가 경쟁력 기반의 공급망 통합력",
+    ],
+}
+_COMPANY_EVIDENCE_POOL_LIMIT = 16
+_COMPANY_CITATION_LIMIT = 10
 
 
 def _strip_company_names(query: str, target_company: str) -> str:
@@ -64,11 +96,11 @@ def _build_company_queries(company: str, query: str) -> list[str]:
     scoped_query = _strip_company_names(query, company)
     base_query = f"{company} {scoped_query}".strip()
     return [
-        f"{base_query} 과거 전략 진화 포트폴리오",
-        f"{company} 현재 생산 거점 고객 포트폴리오 재무 체력",
-        f"{company} 미래 투자 전략 케미스트리 로드맵",
-        f"{company} ESS 리사이클링 공급망 내재화",
-        f"{company} 지역 다각화 IRA 유럽 정책 수혜",
+        f"{base_query} 제품 포트폴리오 케미스트리 ESS 비EV 전략",
+        f"{company} 생산 거점 지역 다각화 IRA 유럽 정책 대응",
+        f"{company} 공급망 내재화 리사이클링 원가 경쟁력",
+        f"{company} 고객 포트폴리오 OEM 재무 체력 수익성",
+        f"{company} 증설 투자 기술 로드맵 차세대 배터리",
     ]
 
 
@@ -135,6 +167,15 @@ def _tokenize(text: str) -> set[str]:
 @lru_cache(maxsize=1)
 def _loaded_documents() -> tuple[dict, ...]:
     return tuple(load_documents())
+
+
+def _available_company_sources(company: str) -> tuple[str, ...]:
+    sources = {
+        document.get("source")
+        for document in _loaded_documents()
+        if document.get("analysis_scope") == "company" and document.get("company") == company
+    }
+    return tuple(sorted(source for source in sources if source))
 
 
 def _fallback_company_results(company: str, query: str, limit: int = 6) -> list[dict]:
@@ -211,14 +252,53 @@ def _select_company_results(company: str, results: list[dict]) -> list[dict]:
         key=lambda item: _company_result_priority(company, item),
         reverse=True,
     )
-    return ranked[:8]
+    return _diversify_company_results(ranked, limit=_COMPANY_EVIDENCE_POOL_LIMIT)
+
+
+def _diversify_company_results(
+    ranked_results: list[dict],
+    *,
+    limit: int,
+    max_per_source: int = 4,
+) -> list[dict]:
+    selected: list[dict] = []
+    selected_chunk_ids: set[str] = set()
+    source_counts: dict[str, int] = {}
+
+    for result in ranked_results:
+        source = result.get("source") or "unknown"
+        if source_counts.get(source, 0) >= max_per_source:
+            continue
+
+        chunk_id = result.get("chunk_id")
+        if chunk_id in selected_chunk_ids:
+            continue
+
+        selected.append(result)
+        if chunk_id is not None:
+            selected_chunk_ids.add(chunk_id)
+        source_counts[source] = source_counts.get(source, 0) + 1
+        if len(selected) >= limit:
+            return selected
+
+    for result in ranked_results:
+        chunk_id = result.get("chunk_id")
+        if chunk_id in selected_chunk_ids:
+            continue
+        selected.append(result)
+        if chunk_id is not None:
+            selected_chunk_ids.add(chunk_id)
+        if len(selected) >= limit:
+            break
+
+    return selected
 
 
 def _merge_company_results(
     company: str,
     primary: list[dict],
     supplements: list[dict],
-    limit: int = 8,
+    limit: int = _COMPANY_EVIDENCE_POOL_LIMIT,
 ) -> list[dict]:
     merged: list[dict] = []
     seen_chunk_ids: set[str] = set()
@@ -235,7 +315,19 @@ def _merge_company_results(
         key=lambda item: _company_result_priority(company, item),
         reverse=True,
     )
-    return merged[:limit]
+    return _diversify_company_results(merged, limit=limit)
+
+
+def _select_citation_evidence(company: str, results: list[dict]) -> list[dict]:
+    return _diversify_company_results(
+        sorted(
+            results,
+            key=lambda item: _company_result_priority(company, item),
+            reverse=True,
+        ),
+        limit=min(_COMPANY_CITATION_LIMIT, len(results)),
+        max_per_source=5,
+    )
 
 
 def _extract_strategies(results: list[dict]) -> list[str]:
@@ -278,28 +370,42 @@ def _extract_risks(results: list[dict]) -> list[str]:
     return deduplicated[:4]
 
 
-def _build_time_narrative(company: str, results: list[dict]) -> dict:
-    top_results = results[:6]
-    past_sources = top_results[:2]
-    present_sources = top_results[2:4]
-    future_sources = top_results[4:6]
+def _extract_core_competitiveness(company: str, results: list[dict]) -> list[str]:
+    text_blob = " ".join(result.get("chunk", "").lower() for result in results)
+    competitiveness: list[str] = []
 
-    past = (
-        " / ".join(f"{_snippet(item['chunk'])} {_citation(item)}" for item in past_sources)
-        if past_sources
-        else f"{company}의 과거 전략 진화는 현재 문서 적재가 부족해 정성적 추정에 의존합니다."
+    for keywords, label in _CORE_COMPETITIVENESS_RULES.get(company, []):
+        if any(keyword in text_blob for keyword in keywords):
+            competitiveness.append(label)
+
+    if not competitiveness:
+        competitiveness = list(_CORE_COMPETITIVENESS_DEFAULTS.get(company, []))
+
+    deduplicated: list[str] = []
+    for item in competitiveness:
+        if item in deduplicated:
+            continue
+        deduplicated.append(item)
+    return deduplicated[:4]
+
+
+def _build_portfolio_strategy(company: str, strategies: list[str], competitiveness: list[str]) -> str:
+    strategy_focus = "·".join(strategies[:2]) if strategies else "포트폴리오 다각화"
+    competitiveness_focus = "·".join(competitiveness[:2]) if competitiveness else "핵심 경쟁력 강화"
+    return (
+        f"{company}은(는) {strategy_focus}를 중심으로 사업 포트폴리오를 넓히고, "
+        f"{competitiveness_focus}를 통해 실행력을 확보하려는 구조입니다."
     )
-    present = (
-        " / ".join(f"{_snippet(item['chunk'])} {_citation(item)}" for item in present_sources)
-        if present_sources
-        else f"{company}의 현재 포지션은 생산능력·고객 믹스·수익성 관리 축에서 추가 확인이 필요합니다."
+
+
+def _build_strategic_position(company: str, strategies: list[str], competitiveness: list[str], risks: list[str]) -> str:
+    strategy_focus = " 및 ".join(strategies[:2]) if strategies else "다각화 전략"
+    competitiveness_focus = ", ".join(competitiveness[:2]) if competitiveness else "핵심 경쟁력"
+    risk_focus = risks[0] if risks else "시장 수요와 수익성 변동성"
+    return (
+        f"{company}의 현재 전략적 포지션은 {strategy_focus}를 축으로 {competitiveness_focus}를 강화하면서도, "
+        f"{risk_focus}에 대응해야 하는 상태로 해석됩니다."
     )
-    future = (
-        " / ".join(f"{_snippet(item['chunk'])} {_citation(item)}" for item in future_sources)
-        if future_sources
-        else f"{company}는 케미스트리 전환과 지역 다각화로 미래 변동성에 대응할 가능성이 큽니다."
-    )
-    return {"past": past, "present": present, "future": future}
 
 
 def company_analyst_node(state: ReportState) -> dict:
@@ -312,7 +418,7 @@ def company_analyst_node(state: ReportState) -> dict:
     실행 흐름:
     1. 기업별 전략 관련 쿼리 생성
     2. RAG: 대상 기업 문서 범위에서만 pgvector 검색 (관련도 < 0.65 → Rewrite, max 2회)
-    3. 기업별 전략 진화 내러티브 생성 (과거→현재→미래)
+    3. 기업별 포트폴리오 전략·핵심 경쟁력·리스크 구조화
     4. 비교 데이터 구조화
     5. State 기록 → Supervisor 반환
 
@@ -326,33 +432,45 @@ def company_analyst_node(state: ReportState) -> dict:
     for candidate_query in _build_company_queries(target, state["query"]):
         raw_results.extend(_run_rag_loop(target, candidate_query))
     results = _select_company_results(target, raw_results)
+    available_sources = _available_company_sources(target)
+    selected_sources = {item.get("source") for item in results if item.get("source")}
+    required_source_count = min(2, len(available_sources))
     preferred_count = sum(
         1
         for item in results
         if item.get("analysis_scope") == "company" and item.get("company") == target
     )
-    if preferred_count < 4:
+    if preferred_count < 4 or len(selected_sources) < required_source_count:
         fallback_results = _fallback_company_results(target, state["query"])
         results = _merge_company_results(target, results, fallback_results)
+    citation_evidence = _select_citation_evidence(target, results)
 
-    time_narrative = _build_time_narrative(target, results)
     strategies = _extract_strategies(results)
+    core_competitiveness = _extract_core_competitiveness(target, results)
     risks = _extract_risks(results)
+    portfolio_strategy = _build_portfolio_strategy(target, strategies, core_competitiveness)
+    strategic_position = _build_strategic_position(
+        target,
+        strategies,
+        core_competitiveness,
+        risks,
+    )
     source_refs = []
-    for result in results[:6]:
+    for result in citation_evidence[:6]:
         citation = _citation(result)
         if citation not in source_refs:
             source_refs.append(citation)
 
     analysis = {
         "company": target,
-        "past": time_narrative["past"],
-        "present": time_narrative["present"],
-        "future": time_narrative["future"],
+        "portfolio_strategy": portfolio_strategy,
+        "strategic_position": strategic_position,
+        "core_competitiveness": core_competitiveness,
         "key_strategy": strategies,
         "risk_factors": risks,
         "source_refs": source_refs,
-        "evidence": results[:8],
+        "evidence_pool": results,
+        "evidence": citation_evidence,
     }
 
     return {

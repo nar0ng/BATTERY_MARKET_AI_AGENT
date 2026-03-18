@@ -37,9 +37,12 @@ def _count_words(text: str) -> int:
 
 
 def _summarize_company_for_dimension(analysis: dict, keywords: tuple[str, ...], fallback: str) -> str:
+    core_competitiveness = " ".join(analysis.get("core_competitiveness", []))
+    strategic_position = analysis.get("strategic_position", "")
+    portfolio_strategy = analysis.get("portfolio_strategy", "")
     key_strategies = " ".join(analysis.get("key_strategy", []))
     risk_factors = " ".join(analysis.get("risk_factors", []))
-    content = f"{analysis.get('present', '')} {analysis.get('future', '')} {key_strategies} {risk_factors}".lower()
+    content = f"{strategic_position} {portfolio_strategy} {core_competitiveness} {key_strategies} {risk_factors}".lower()
     if any(keyword in content for keyword in keywords):
         return f"{analysis.get('company', '기업')}는 {fallback}"
     return fallback
@@ -298,11 +301,12 @@ def _run_quality_check(state: ReportState) -> dict:
         details.append(f"SWOT 분류 오류 {swot_misclassified}건")
         failed_agents.append("swot_extractor")
 
-    report_time_coverage = all(keyword in report_draft for keyword in ["과거", "현재", "미래"])
+    market_section = sections.get("시장 배경", "")
+    report_time_coverage = all(keyword in market_section for keyword in ["과거", "현재", "미래"])
     if report_time_coverage:
-        details.append("과거·현재·미래 시간축 포함")
+        details.append("시장 배경의 과거·현재·미래 시간축 포함")
     else:
-        details.append("시간축 서술(과거·현재·미래) 보완 필요")
+        details.append("시장 배경의 시간축 서술(과거·현재·미래) 보완 필요")
         failed_agents.append("report_writer")
 
     has_inline_citation = "[출처:" in report_draft
