@@ -85,7 +85,7 @@ def format_reference(source: dict) -> str:
         )
         year = _extract_year(source)
         title = _safe_text(source.get("title") or source.get("source"), "제목 미상")
-        return f"{publisher}({year}). {title}. {url}"
+        return f"{publisher}({year}). *{title}*. {url}"
 
     if ref_type == "paper":
         author = _safe_text(source.get("author"), "저자 미상")
@@ -95,7 +95,7 @@ def format_reference(source: dict) -> str:
         volume = _safe_text(source.get("volume"), "0")
         issue = _safe_text(source.get("issue"), "0")
         pages = _safe_text(source.get("pages"), "1-1")
-        return f"{author}({year}). {title}. {journal}, {volume}({issue}), {pages}."
+        return f"{author}({year}). {title}. *{journal}*, {volume}({issue}), {pages}."
 
     author = _safe_text(
         source.get("publisher") or source.get("author"),
@@ -104,7 +104,7 @@ def format_reference(source: dict) -> str:
     date = _extract_date(source)
     title = _safe_text(source.get("title"), "제목 미상")
     site_name = _safe_text(source.get("site_name"), _default_site_name(url))
-    return f"{author}({date}). {title}. {site_name}, {url}"
+    return f"{author}({date}). *{title}*. {site_name}, {url}"
 
 
 def format_all_references(sources: list[dict]) -> dict:

@@ -53,15 +53,31 @@ def _trim_words(text: str, max_words: int) -> str:
 
 
 def _humanize_source_name(source_name: str) -> str:
+    known_titles = {
+        "BATTERY-REPORT.pdf": "글로벌 배터리 시장 분석용 RAG 데이터팩",
+        "LG-REPORT.pdf": "LG에너지솔루션 기업 분석용 RAG 데이터팩",
+        "LG-REPORT-2.pdf": "LG에너지솔루션 글로벌 전략 및 핵심 경쟁력 분석 보고서",
+        "CATL-REPORT.pdf": "CATL 기업 분석용 RAG 데이터팩",
+        "CATL-REPORT-2.pdf": "CATL 글로벌 전략 및 핵심 경쟁력 분석 보고서",
+    }
+    if source_name in known_titles:
+        return known_titles[source_name]
+
     stem = re.sub(r"\.pdf$", "", source_name, flags=re.IGNORECASE)
     normalized = stem.replace("_", " ").replace("-", " ").strip()
     return normalized or source_name
 
 
 def _extract_document_title_from_chunk(text: str, source_name: str) -> str:
-    cleaned = " ".join((text or "").split()).strip()
+    preferred_title = _humanize_source_name(source_name)
+    if preferred_title != source_name:
+        return preferred_title
+
+    raw_text = (text or "").strip()
+    first_line = next((line.strip() for line in raw_text.splitlines() if line.strip()), "")
+    cleaned = " ".join(raw_text.split()).strip()
     if not cleaned:
-        return _humanize_source_name(source_name)
+        return preferred_title
 
     separators = [
         " 문서 목적",
@@ -70,16 +86,23 @@ def _extract_document_title_from_chunk(text: str, source_name: str) -> str:
         " 본 문서는",
         " 1.",
         " Ⅰ.",
+        " 2025년",
+        " 2026년",
     ]
-    cutoff = len(cleaned)
+    base = first_line or cleaned
+    cutoff = len(base)
     for separator in separators:
-        index = cleaned.find(separator)
+        index = base.find(separator)
         if index > 0:
             cutoff = min(cutoff, index)
 
-    title = cleaned[:cutoff].strip(" :.-")
-    if len(title) < 6:
-        return _humanize_source_name(source_name)
+    title = base[:cutoff].strip(" :.-")
+    title = re.split(r"\s[:\-]\s", title, maxsplit=1)[0].strip(" :.-")
+
+    too_long = len(title) > 80 or len(title.split()) > 14
+    looks_like_body = any(marker in title for marker in ("입니다", "보여줍니다", "분석합니다", "의미합니다"))
+    if len(title) < 6 or too_long or looks_like_body:
+        return preferred_title
     return title
 
 
@@ -113,11 +136,11 @@ def _build_reference_sources(state: ReportState) -> list[dict]:
     title_lookup = _document_title_lookup(state)
 
     for result in state.get("market_rag_results", []):
-        key = f"doc:{result.get('source')}:{result.get('page')}"
+        source_name = result.get("source", "문서")
+        key = f"doc:{source_name}"
         if key in seen:
             continue
         seen.add(key)
-        source_name = result.get("source", "문서")
         sources.append(
             {
                 "type": "report",
@@ -132,11 +155,11 @@ def _build_reference_sources(state: ReportState) -> list[dict]:
 
     for analysis in state.get("company_analyses", {}).values():
         for result in analysis.get("evidence", []):
-            key = f"doc:{result.get('source')}:{result.get('page')}"
+            source_name = result.get("source", "문서")
+            key = f"doc:{source_name}"
             if key in seen:
                 continue
             seen.add(key)
-            source_name = result.get("source", "문서")
             sources.append(
                 {
                     "type": "report",
@@ -177,6 +200,38 @@ def _build_reference_lookup(sources: list[dict]) -> dict[str, str]:
         elif source.get("url"):
             lookup[f"web:{source.get('url')}"] = formatted
     return lookup
+
+
+def _extract_used_reference_texts(footnotes: list[str]) -> set[str]:
+    used: set[str] = set()
+    for footnote in footnotes:
+        match = re.match(r"^\[\^[^\]]+\]:\s*(.+)$", footnote.strip())
+        if not match:
+            continue
+        reference_text = re.sub(r",\s*p\.\d+\s*$", "", match.group(1).strip())
+        if reference_text:
+            used.add(reference_text)
+    return used
+
+
+def _filter_reference_sources_by_text(
+    sources: list[dict],
+    used_reference_texts: set[str],
+) -> list[dict]:
+    if not used_reference_texts:
+        return []
+
+    filtered: list[dict] = []
+    seen: set[str] = set()
+    for source in sources:
+        formatted = format_reference(source)
+        if formatted not in used_reference_texts:
+            continue
+        if formatted in seen:
+            continue
+        seen.add(formatted)
+        filtered.append(source)
+    return filtered
 
 
 _STRATEGY_SUMMARY_MAP = {
@@ -270,14 +325,13 @@ def _market_result_key(result: dict) -> str:
 
 
 def _build_market_footnotes(
-    rag_results: list[dict],
-    web_results: list[dict],
+    used_results: list[dict],
     reference_lookup: dict[str, str],
 ) -> tuple[dict[str, str], list[str]]:
     ref_ids: dict[str, str] = {}
     footnotes: list[str] = []
 
-    for result in [*rag_results[:6], *web_results[:6]]:
+    for result in used_results:
         key = _market_result_key(result)
         if key in ref_ids:
             continue
@@ -557,13 +611,13 @@ def _render_company_section(
             "\n".join(
                 [
                     f"### {company}",
-                    f"포트폴리오 다각화 전략: {portfolio_strategy}{_footnote_marks(grouped_evidence['overview'], ref_ids)}",
-                    f"전략적 포지션: {strategic_position}{_footnote_marks(grouped_evidence['overview'], ref_ids)}",
-                    "핵심 경쟁력:",
+                    f"**포트폴리오 다각화 전략**\n{portfolio_strategy}{_footnote_marks(grouped_evidence['overview'], ref_ids)}",
+                    f"**전략적 포지션**\n{strategic_position}{_footnote_marks(grouped_evidence['overview'], ref_ids)}",
+                    "**핵심 경쟁력**",
                     *competitiveness_lines,
-                    "핵심 전략:",
+                    "**핵심 전략**",
                     *strategy_lines,
-                    "주요 리스크:",
+                    "**주요 리스크**",
                     *risk_lines,
                 ]
             ).strip()
@@ -662,7 +716,6 @@ def _render_market_section(
 ) -> tuple[str, list[str]]:
     rag_results = state.get("market_rag_results", [])
     web_results = state.get("market_web_results", [])
-    ref_ids, footnotes = _build_market_footnotes(rag_results, web_results, reference_lookup)
 
     past_sources = _select_market_evidence(rag_results, web_results, "past")
     current_sources = _select_market_evidence(rag_results, web_results, "current")
@@ -685,6 +738,8 @@ def _render_market_section(
     pro_count = sum(1 for item in web_results if item.get("pro_con_tag") == "pro")
     con_count = sum(1 for item in web_results if item.get("pro_con_tag") == "con")
     balance_sources = [item for item in web_results if item.get("pro_con_tag") in {"pro", "con"}][:2]
+    used_sources = [*past_sources, *current_sources, *future_sources, *balance_sources]
+    ref_ids, footnotes = _build_market_footnotes(used_sources, reference_lookup)
 
     if pro_count and con_count:
         signal_line = (
@@ -1062,9 +1117,14 @@ def report_writer_node(state: ReportState) -> dict:
     swot_section, swot_footnotes = _render_swot_section(state, reference_lookup)
     implications_section, implication_llm_calls = _render_implications(state)
 
-    reference_groups = format_all_references(reference_sources)
-    reference_section, flattened_references = _render_reference_section(reference_groups)
     all_footnotes = [*market_footnotes, *company_footnotes, *swot_footnotes]
+    used_reference_texts = _extract_used_reference_texts(all_footnotes)
+    used_reference_sources = _filter_reference_sources_by_text(
+        reference_sources,
+        used_reference_texts,
+    )
+    reference_groups = format_all_references(used_reference_sources)
+    reference_section, flattened_references = _render_reference_section(reference_groups)
     if all_footnotes:
         footnote_block = "\n".join(all_footnotes)
         reference_section = f"{reference_section}\n\n## 각주\n{footnote_block}".strip()

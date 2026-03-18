@@ -97,6 +97,27 @@ SECTION_SUMMARY_TEMPLATE = """다음 보고서 전체 내용을 바탕으로 SUM
 - 의사결정자가 이것만 읽어도 핵심을 파악할 수 있는 수준
 """
 
+SUPERVISOR_FINALIZE_TEMPLATE = """다음은 품질 검증을 통과한 전략 분석 보고서 초안의 본문입니다.
+
+초안 본문:
+{report_body}
+
+Supervisor 편집 원칙:
+- 사실관계, 비교 판단, 각주 마커(`[^...]`), 표 내용은 유지할 것
+- 새로운 출처나 주장, 수치를 추가하지 말 것
+- REFERENCE와 각주 섹션은 수정하지 않을 것
+- 시장 배경만 과거·현재·미래 시간축을 유지할 것
+- 기업 섹션은 시간축이 아니라 포트폴리오 전략, 전략적 포지션, 핵심 경쟁력, 핵심 전략, 주요 리스크 순서로 읽기 좋게 정리할 것
+- 메인 제목과 섹션 제목은 짧고 읽기 좋게 다듬을 것
+- 문장을 더 짧고 자연스럽게 다듬고, 단락과 불릿, 소제목 간격을 보기 좋게 정리할 것
+- 과도한 반복, 군더더기 문장, 메타 설명은 제거할 것
+- 마크다운 섹션 제목(`#`, `###`)은 유지할 것
+
+반환 형식:
+- SUMMARY부터 종합 시사점까지의 본문만 반환
+- REFERENCE는 포함하지 말 것
+"""
+
 REFERENCE_TEMPLATE = """다음 출처 목록을 REFERENCE 형식으로 변환하세요.
 
 사용된 출처:
@@ -104,13 +125,18 @@ REFERENCE_TEMPLATE = """다음 출처 목록을 REFERENCE 형식으로 변환하
 
 형식 규칙:
 ■ 기관 보고서
-  발행기관(YYYY). 보고서명. URL
+  발행기관(YYYY). *보고서명*. URL
 
 ■ 학술 논문
-  저자(YYYY). 논문제목. 학술지명, 권(호), 페이지.
+  저자(YYYY). 논문제목. *학술지명*, 권(호), 페이지.
 
 ■ 웹페이지
-  기관명 또는 작성자(YYYY-MM-DD). 제목. 사이트명, URL
+  기관명 또는 작성자(YYYY-MM-DD). *제목*. 사이트명, URL
+
+예시:
+- 기관 보고서: BloombergNEF(2025). *Battery Market Outlook 2025*. https://about.bnef.com/
+- 학술 논문: Tarascon, J. M.(2024). Battery chemistry transitions in EV markets. *Nature Energy*, 9(1), 1-10.
+- 웹페이지: International Energy Agency(2026-03-01). *Global EV Outlook Update*. IEA, https://www.iea.org/
 
 주의: 본문에서 실제 인용된 자료만 포함하세요. 수집했지만 미인용 자료는 제외합니다.
 카테고리별로 그룹핑하여 출력하세요.

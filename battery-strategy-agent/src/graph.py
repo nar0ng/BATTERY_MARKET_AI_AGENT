@@ -5,11 +5,42 @@ LangGraph 워크플로우 정의.
 from langgraph.graph import StateGraph, END
 
 from src.state import ReportState
-from src.agents.supervisor import supervisor_node, supervisor_route
-from src.agents.market_analyst import market_analyst_node
-from src.agents.company_analyst import company_analyst_node
-from src.agents.swot_extractor import swot_extractor_node
-from src.agents.report_writer import report_writer_node
+
+
+def _supervisor_node(state: ReportState) -> dict:
+    from src.agents.supervisor import supervisor_node
+
+    return supervisor_node(state)
+
+
+def _supervisor_route(state: ReportState):
+    from src.agents.supervisor import supervisor_route
+
+    return supervisor_route(state)
+
+
+def _market_analyst_node(state: ReportState) -> dict:
+    from src.agents.market_analyst import market_analyst_node
+
+    return market_analyst_node(state)
+
+
+def _company_analyst_node(state: ReportState) -> dict:
+    from src.agents.company_analyst import company_analyst_node
+
+    return company_analyst_node(state)
+
+
+def _swot_extractor_node(state: ReportState) -> dict:
+    from src.agents.swot_extractor import swot_extractor_node
+
+    return swot_extractor_node(state)
+
+
+def _report_writer_node(state: ReportState) -> dict:
+    from src.agents.report_writer import report_writer_node
+
+    return report_writer_node(state)
 
 
 def build_graph() -> StateGraph:
@@ -18,11 +49,11 @@ def build_graph() -> StateGraph:
     workflow = StateGraph(ReportState)
 
     # ── 노드 등록 ──
-    workflow.add_node("supervisor", supervisor_node)
-    workflow.add_node("market_analyst", market_analyst_node)
-    workflow.add_node("company_analyst", company_analyst_node)
-    workflow.add_node("swot_extractor", swot_extractor_node)
-    workflow.add_node("report_writer", report_writer_node)
+    workflow.add_node("supervisor", _supervisor_node)
+    workflow.add_node("market_analyst", _market_analyst_node)
+    workflow.add_node("company_analyst", _company_analyst_node)
+    workflow.add_node("swot_extractor", _swot_extractor_node)
+    workflow.add_node("report_writer", _report_writer_node)
 
     # ── 진입점 ──
     workflow.set_entry_point("supervisor")
@@ -39,7 +70,7 @@ def build_graph() -> StateGraph:
     # ── Supervisor → 조건부 라우팅 (병렬 Send 포함) ──
     workflow.add_conditional_edges(
         "supervisor",
-        supervisor_route,
+        _supervisor_route,
         {
             "market_analyst": "market_analyst",
             "company_analyst": "company_analyst",

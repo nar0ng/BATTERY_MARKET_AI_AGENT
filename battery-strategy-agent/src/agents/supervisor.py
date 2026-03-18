@@ -15,18 +15,24 @@ Supervisor 에이전트.
 """
 from __future__ import annotations
 
+import os
 import re
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END
 from langgraph.types import Send
+from langchain_openai import ChatOpenAI
 
 from config.settings import (
+    LLM_MODEL,
+    LLM_TEMPERATURE,
     MAX_ITERATIONS,
     MAX_LLM_CALLS,
     MAX_WEB_SEARCHES,
     REQUIRED_SECTIONS,
     SUMMARY_MAX_WORDS,
 )
+from src.prompts.report_prompt import REPORT_SYSTEM, SUPERVISOR_FINALIZE_TEMPLATE
 from src.state import ReportState
 from src.tools.reference_formatter import validate_reference_format
 from src.tools.web_search import check_bias_ratio
@@ -147,29 +153,176 @@ def _extract_sections(report_draft: str) -> dict[str, str]:
     return sections
 
 
-def _compose_final_report(state: ReportState, quality_result: dict) -> str:
-    """품질 승인 이후 Supervisor가 최종 보고서를 직접 조립합니다."""
+def _normalize_blank_lines(text: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", text.strip())
+
+
+def _polish_list_spacing(text: str) -> str:
+    lines = text.splitlines()
+    polished: list[str] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if index > 0 and stripped.startswith(("- ", "1.", "2.", "3.", "4.", "5.")):
+            if polished and polished[-1].strip():
+                polished.append("")
+        polished.append(line.rstrip())
+    return "\n".join(polished).strip()
+
+
+def _polish_company_section_layout(body: str) -> str:
+    replacements = {
+        "포트폴리오 다각화 전략:": "**포트폴리오 다각화 전략**",
+        "전략적 포지션:": "**전략적 포지션**",
+        "핵심 경쟁력:": "**핵심 경쟁력**",
+        "핵심 전략:": "**핵심 전략**",
+        "주요 리스크:": "**주요 리스크**",
+    }
+
+    lines = []
+    for raw_line in body.splitlines():
+        stripped = raw_line.strip()
+        matched = False
+        for prefix, replacement in replacements.items():
+            if stripped.startswith(prefix):
+                payload = stripped[len(prefix):].strip()
+                lines.append(replacement)
+                if payload:
+                    lines.append(payload)
+                lines.append("")
+                matched = True
+                break
+        if not matched:
+            lines.append(raw_line.rstrip())
+
+    return _polish_list_spacing(_normalize_blank_lines("\n".join(lines)))
+
+
+def _polish_market_section_layout(body: str) -> str:
+    lines: list[str] = []
+    for raw_line in body.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("과거:"):
+            lines.append(f"- **과거**: {stripped[3:].strip()}")
+        elif stripped.startswith("현재:"):
+            lines.append(f"- **현재**: {stripped[3:].strip()}")
+        elif stripped.startswith("미래:"):
+            lines.append(f"- **미래**: {stripped[3:].strip()}")
+        elif stripped.startswith("시장 신호:"):
+            lines.append("")
+            lines.append(f"> {stripped}")
+        else:
+            lines.append(raw_line.rstrip())
+    return _normalize_blank_lines("\n".join(lines))
+
+
+def _polish_summary_layout(body: str) -> str:
+    sentences = re.split(r"(?<=[.!?다])\s+", body.strip())
+    cleaned = " ".join(sentence.strip() for sentence in sentences if sentence.strip())
+    return _normalize_blank_lines(cleaned)
+
+
+def _heuristic_polish_sections(sections: dict[str, str]) -> dict[str, str]:
+    polished = dict(sections)
+    polished["SUMMARY"] = _polish_summary_layout(sections.get("SUMMARY", ""))
+    polished["시장 배경"] = _polish_market_section_layout(sections.get("시장 배경", ""))
+    polished["기업별 포트폴리오 다각화 전략 및 핵심 경쟁력"] = _polish_company_section_layout(
+        sections.get("기업별 포트폴리오 다각화 전략 및 핵심 경쟁력", "")
+    )
+    polished["핵심 전략 비교 및 SWOT 분석"] = _normalize_blank_lines(
+        _polish_list_spacing(sections.get("핵심 전략 비교 및 SWOT 분석", ""))
+    )
+    polished["종합 시사점"] = _normalize_blank_lines(
+        _polish_list_spacing(sections.get("종합 시사점", ""))
+    )
+    return polished
+
+
+def _compose_readable_body(sections: dict[str, str]) -> str:
+    parts: list[str] = []
+    for section in REQUIRED_SECTIONS:
+        if section == "REFERENCE":
+            continue
+        body = sections.get(section, "").strip()
+        if not body:
+            continue
+        parts.append(f"# {section}\n{body}".strip())
+    return "\n\n".join(parts).strip()
+
+
+def _build_final_report_title(query: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (query or "").strip())
+    cleaned = re.sub(r"(해줘|해주세요|비교해줘|분석해줘|평가해줘)\s*$", "", cleaned).strip(" ?.")
+
+    if "LG에너지솔루션" in cleaned and "CATL" in cleaned and "캐즘" in cleaned:
+        return "전기차 캐즘 국면 배터리 전략 비교 보고서"
+    if "LG에너지솔루션" in cleaned and "CATL" in cleaned:
+        return "LG에너지솔루션 vs CATL 전략 비교 보고서"
+    if len(cleaned) > 40:
+        cleaned = cleaned[:40].rstrip() + "..."
+    return f"{cleaned or '배터리 전략 분석'} 보고서"
+
+
+def _render_final_section_heading(index: int, section: str) -> str:
+    return f"# {index}. {section}"
+
+
+def _message_content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(part.strip() for part in parts if part.strip()).strip()
+    return str(content).strip()
+
+
+def _llm_polish_sections(sections: dict[str, str]) -> tuple[dict[str, str], int]:
+    if not os.getenv("OPENAI_API_KEY"):
+        return sections, 0
+
+    report_body = _compose_readable_body(sections)
+    if not report_body:
+        return sections, 0
+
+    prompt = SUPERVISOR_FINALIZE_TEMPLATE.format(report_body=report_body)
+    try:
+        llm = ChatOpenAI(model=LLM_MODEL, temperature=LLM_TEMPERATURE)
+        response = llm.invoke(
+            [
+                SystemMessage(content=REPORT_SYSTEM),
+                HumanMessage(content=prompt),
+            ]
+        )
+        polished_body = _message_content_to_text(response.content)
+        polished_sections = _extract_sections(polished_body)
+        required_non_reference = [section for section in REQUIRED_SECTIONS if section != "REFERENCE"]
+        if all(polished_sections.get(section, "").strip() for section in required_non_reference):
+            polished_sections["REFERENCE"] = sections.get("REFERENCE", "")
+            return polished_sections, 1
+    except Exception:
+        return sections, 0
+
+    return sections, 0
+
+
+def _compose_final_report(state: ReportState, quality_result: dict) -> tuple[str, int]:
+    """품질 승인 이후 Supervisor가 가독성까지 반영해 최종 보고서를 조립합니다."""
     report_draft = (state.get("report_draft") or "").strip()
     sections = _extract_sections(report_draft)
-    approved_details = quality_result.get("details", [])
+    sections = _heuristic_polish_sections(sections)
+    sections, llm_calls = _llm_polish_sections(sections)
 
-    final_parts = [
-        "# Supervisor Final Report",
-        "\n".join(
-            [
-                "## Supervisor 최종 판단",
-                "본 문서는 `report_writer` 초안을 Supervisor가 품질 기준에 따라 검토한 뒤 최종 확정한 버전입니다.",
-                *[f"- {detail}" for detail in approved_details],
-            ]
-        ).strip(),
-    ]
-
-    for section in REQUIRED_SECTIONS:
+    final_parts: list[str] = [f"# {_build_final_report_title(state.get('query', ''))}"]
+    for index, section in enumerate(REQUIRED_SECTIONS, start=1):
         body = sections.get(section, "").strip()
-        final_parts.append(f"# {section}\n{body}".strip())
+        final_parts.append(f"{_render_final_section_heading(index, section)}\n{body}".strip())
 
-    finalized = "\n\n".join(part for part in final_parts if part).strip()
-    return re.sub(r"\n{3,}", "\n\n", finalized)
+    finalized = _normalize_blank_lines("\n\n".join(part for part in final_parts if part))
+    return finalized, llm_calls
 
 
 def supervisor_node(state: ReportState) -> dict:
@@ -192,10 +345,13 @@ def supervisor_node(state: ReportState) -> dict:
         updates["quality_score"] = quality_result
         updates["quality_checked"] = True
         if quality_result["passed"]:
-            updates["final_report"] = _compose_final_report(
+            final_report, llm_calls = _compose_final_report(
                 prospective_state,
                 quality_result,
             )
+            updates["final_report"] = final_report
+            if llm_calls:
+                updates["llm_call_count"] = state.get("llm_call_count", 0) + llm_calls
         else:
             updates["final_report"] = None
             updates["iteration_count"] = state.get("iteration_count", 0) + 1
@@ -341,6 +497,20 @@ def _run_quality_check(state: ReportState) -> dict:
         failed_agents.append("report_writer")
     else:
         details.append("빈 섹션 없음")
+
+    company_section = sections.get("기업별 포트폴리오 다각화 전략 및 핵심 경쟁력", "")
+    readability_markers = [
+        "### LG에너지솔루션" in company_section,
+        "### CATL" in company_section,
+        "핵심 경쟁력" in company_section,
+        "핵심 전략" in company_section,
+        "주요 리스크" in company_section,
+    ]
+    if all(readability_markers):
+        details.append("기업 섹션 가독성 구조 확인")
+    else:
+        details.append("기업 섹션 가독성 구조 보완 필요")
+        failed_agents.append("report_writer")
 
     unique_failed_agents: list[str] = []
     for agent in failed_agents:
