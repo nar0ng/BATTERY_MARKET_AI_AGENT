@@ -305,10 +305,16 @@ def _run_quality_check(state: ReportState) -> dict:
         details.append("시간축 서술(과거·현재·미래) 보완 필요")
         failed_agents.append("report_writer")
 
-    if "[출처:" in report_draft:
-        details.append("본문 출처 연결 확인")
-    elif state.get("market_rag_results") or state.get("market_web_results"):
-        details.append("본문 출처 연결 부족")
+    has_inline_citation = "[출처:" in report_draft
+    has_footnote_marks = "[^" in report_draft
+    reference_section = sections.get("REFERENCE", "")
+    has_footnote_section = "## 각주" in reference_section
+    if has_footnote_marks and has_footnote_section:
+        details.append("각주 기반 출처 연결 확인")
+    elif has_inline_citation:
+        details.append("인라인 출처 연결 확인")
+    elif state.get("references"):
+        details.append("REFERENCE는 있으나 본문 각주 연결 보완 필요")
         failed_agents.append("report_writer")
     else:
         details.append("출처 데이터가 부족하여 근거 연결 평가는 보류")
