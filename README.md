@@ -152,5 +152,5 @@ battery-strategy-agent/
 추가로 `scripts/export_report_pdf.py`를 사용하면 Markdown 보고서를 스타일이 적용된 PDF로 변환할 수 있다.
 
 ## 10. Contributors 
-- 김철수(김나령) : Prompt Engineering, Agent Design 
-- 최영희(박지현) : PDF Parsing, Retrieval Agent 
+- 김나령 : Supervisor 기반 멀티에이전트 워크플로우 설계, SWOT 추출 Agent 설계, Supervisor Agent 설계, 보고서 초안 Agent 설계
+- 박지현 : Supervisor 기반 멀티에이전트 워크플로우 설계, 시장 분석 Agent 설계, 기업 분석 Agent 설계
