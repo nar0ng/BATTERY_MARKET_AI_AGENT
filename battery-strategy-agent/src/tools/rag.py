@@ -17,7 +17,7 @@ from langchain_postgres import PGEngine, PGVectorStore
 import pdfplumber
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from config.settings import (
@@ -33,6 +33,14 @@ from config.settings import (
     PGVECTOR_TABLE,
     mask_connection_string,
 )
+
+_MARKET_ANALYSIS_SCOPE = "market"
+_COMPANY_ANALYSIS_SCOPE = "company"
+_COMMON_ANALYSIS_SCOPE = "common"
+_KNOWN_COMPANY_DOCUMENTS = {
+    "LG에너지솔루션": ("lgreport", "lgenergysolution", "lges"),
+    "CATL": ("catlreport", "catl"),
+}
 
 
 class SentenceTransformerEmbeddings(Embeddings):
@@ -171,6 +179,63 @@ def _chunk_id(source: str, page: int, chunk_index: int, text_value: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, payload))
 
 
+def _normalize_source_key(source_name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", Path(source_name).stem.lower())
+
+
+def _infer_document_metadata(source_name: str) -> dict:
+    normalized_key = _normalize_source_key(source_name)
+
+    if "batteryreport" in normalized_key or "marketreport" in normalized_key:
+        return {
+            "analysis_scope": _MARKET_ANALYSIS_SCOPE,
+            "company": None,
+            "document_kind": "market_overview",
+        }
+
+    for company, aliases in _KNOWN_COMPANY_DOCUMENTS.items():
+        if any(alias in normalized_key for alias in aliases):
+            return {
+                "analysis_scope": _COMPANY_ANALYSIS_SCOPE,
+                "company": company,
+                "document_kind": "company_profile",
+            }
+
+    return {
+        "analysis_scope": _COMMON_ANALYSIS_SCOPE,
+        "company": None,
+        "document_kind": "general_reference",
+    }
+
+
+def build_market_filter(*, include_common: bool = False) -> dict:
+    """시장 분석 에이전트가 사용할 메타데이터 필터를 생성합니다."""
+    if include_common:
+        return {
+            "$or": [
+                {"analysis_scope": _MARKET_ANALYSIS_SCOPE},
+                {"analysis_scope": _COMMON_ANALYSIS_SCOPE},
+            ]
+        }
+    return {"analysis_scope": _MARKET_ANALYSIS_SCOPE}
+
+
+def build_company_filter(company: str, *, include_common: bool = False) -> dict:
+    """기업 분석 에이전트가 사용할 메타데이터 필터를 생성합니다."""
+    company_filter = {
+        "analysis_scope": _COMPANY_ANALYSIS_SCOPE,
+        "company": company,
+    }
+    if include_common:
+        return {
+            "$or": [
+                company_filter,
+                {"analysis_scope": _COMMON_ANALYSIS_SCOPE},
+            ]
+        }
+    return company_filter
+
+
 def _validate_table_name(table_name: str) -> str:
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name):
         raise ValueError(f"Invalid pgvector table name: {table_name!r}")
@@ -245,6 +310,54 @@ def _table_has_rows(table_name: str) -> bool:
         raise _raise_pgvector_connection_error(exc) from exc
 
 
+def _metadata_column_name(table_name: str) -> str | None:
+    validated = _validate_table_name(table_name)
+    column_names = {
+        column["name"]
+        for column in inspect(_get_sqlalchemy_engine()).get_columns(validated)
+    }
+    for candidate in ("cmetadata", "langchain_metadata"):
+        if candidate in column_names:
+            return candidate
+    return None
+
+
+def _table_has_routing_metadata(table_name: str) -> bool:
+    validated = _validate_table_name(table_name)
+    try:
+        with _get_sqlalchemy_engine().connect() as conn:
+            exists = conn.execute(
+                text("SELECT to_regclass(:table_name)"),
+                {"table_name": validated},
+            ).scalar()
+            if not exists:
+                return False
+
+            total_count = conn.execute(
+                text(f'SELECT COUNT(*) FROM "{validated}"')
+            ).scalar_one()
+            if int(total_count) == 0:
+                return False
+
+            metadata_column = _metadata_column_name(validated)
+            if metadata_column is None:
+                return False
+
+            routed_count = conn.execute(
+                text(
+                    f'''
+                    SELECT COUNT(*)
+                    FROM "{validated}"
+                    WHERE "{metadata_column}"::jsonb ? 'analysis_scope'
+                      AND "{metadata_column}"::jsonb ? 'document_kind'
+                    '''
+                )
+            ).scalar_one()
+            return int(routed_count) == int(total_count)
+    except OperationalError as exc:
+        raise _raise_pgvector_connection_error(exc) from exc
+
+
 def ensure_pgvector_extension() -> None:
     """대상 데이터베이스에 `pgvector` 확장이 설치되어 있는지 확인합니다."""
     try:
@@ -285,6 +398,9 @@ def _documents_to_langchain(documents: list[dict]) -> tuple[list[Document], list
                     "page": document["page"],
                     "source": document["source"],
                     "chunk_id": document["chunk_id"],
+                    "analysis_scope": document["analysis_scope"],
+                    "company": document["company"],
+                    "document_kind": document["document_kind"],
                 },
             )
         )
@@ -316,6 +432,7 @@ def load_documents(data_dir: Path = DATA_DIR) -> list[dict]:
                 continue
 
             for chunk_index, chunk in enumerate(_chunk_text(page_text), start=1):
+                document_metadata = _infer_document_metadata(pdf_path.name)
                 documents.append(
                     {
                         "text": chunk,
@@ -327,6 +444,7 @@ def load_documents(data_dir: Path = DATA_DIR) -> list[dict]:
                             chunk_index,
                             chunk,
                         ),
+                        **document_metadata,
                     }
                 )
 
@@ -366,7 +484,13 @@ def build_pgvector_index(
             with _get_sqlalchemy_engine().begin() as conn:
                 conn.execute(text(f'TRUNCATE TABLE "{validated_table}"'))
 
-        if _table_has_rows(validated_table):
+        table_has_rows = _table_has_rows(validated_table)
+        if table_has_rows and not _table_has_routing_metadata(validated_table):
+            with _get_sqlalchemy_engine().begin() as conn:
+                conn.execute(text(f'TRUNCATE TABLE "{validated_table}"'))
+            table_has_rows = False
+
+        if table_has_rows:
             return store
 
         loaded_documents = documents if documents is not None else load_documents()
@@ -380,20 +504,26 @@ def build_pgvector_index(
         raise _raise_pgvector_connection_error(exc) from exc
 
 
-def search(query: str, top_k: int = VECTOR_SEARCH_TOP_K) -> list[dict]:
+def search(
+    query: str,
+    top_k: int = VECTOR_SEARCH_TOP_K,
+    *,
+    metadata_filter: dict | None = None,
+) -> list[dict]:
     """
     pgvector 유사도 검색
 
     Args:
         query: 검색 쿼리
         top_k: 반환할 청크 수
+        metadata_filter: 문서 메타데이터 필터
 
     Returns:
         list[dict]: [{chunk, score, page, source}]
                     score >= RELEVANCE_THRESHOLD인 것만 반환
     """
     store = build_pgvector_index()
-    retrieved_docs = store.similarity_search(query, k=top_k)
+    retrieved_docs = store.similarity_search(query, k=top_k, filter=metadata_filter)
     if not retrieved_docs:
         return []
 
@@ -414,6 +544,9 @@ def search(query: str, top_k: int = VECTOR_SEARCH_TOP_K) -> list[dict]:
                 "page": document.metadata.get("page"),
                 "source": document.metadata.get("source"),
                 "chunk_id": document.metadata.get("chunk_id"),
+                "analysis_scope": document.metadata.get("analysis_scope"),
+                "company": document.metadata.get("company"),
+                "document_kind": document.metadata.get("document_kind"),
             }
         )
         scored_results.append(result)

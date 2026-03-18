@@ -19,7 +19,12 @@ Control Strategy:
 from __future__ import annotations
 
 from src.state import ReportState
-from src.tools.rag import deduplicate, rewrite_query, search as rag_search
+from src.tools.rag import (
+    build_market_filter,
+    deduplicate,
+    rewrite_query,
+    search as rag_search,
+)
 from src.tools.web_search import (
     check_bias_ratio,
     classify_pro_con,
@@ -42,7 +47,11 @@ def _build_market_queries(query: str) -> list[str]:
 
 def _safe_rag_search(query: str) -> list[dict]:
     try:
-        return rag_search(query, top_k=5)
+        return rag_search(
+            query,
+            top_k=5,
+            metadata_filter=build_market_filter(),
+        )
     except Exception:
         return []
 
@@ -136,7 +145,7 @@ def market_analyst_node(state: ReportState) -> dict:
 
     실행 흐름:
     1. 시장 배경 관련 쿼리 생성
-    2. RAG: pgvector에서 문서 검색 (관련도 < 0.65 → Rewrite, max 2회)
+    2. RAG: 시장 분석용 문서 범위에서만 pgvector 검색 (관련도 < 0.65 → Rewrite, max 2회)
     3. Web: Tavily로 최신 시장 동향 검색 (찬/반 쌍 쿼리)
     4. 편향 비율 > 7:3 → 소수 관점 보충 검색 (Conditional Branch)
     5. 결과 통합 → 시장 배경 요약 생성

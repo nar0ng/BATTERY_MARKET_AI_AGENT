@@ -23,17 +23,18 @@ from functools import lru_cache
 
 from config.settings import MAX_QUERY_REWRITE
 from src.state import ReportState
-from src.tools.rag import deduplicate, load_documents, rewrite_query, search as rag_search
+from src.tools.rag import (
+    build_company_filter,
+    deduplicate,
+    load_documents,
+    rewrite_query,
+    search as rag_search,
+)
 
 _COMPANY_ALIASES = {
     "LG에너지솔루션": ("lg에너지솔루션", "lg energy solution", "lg energy solutions", "lges"),
     "CATL": ("catl", "宁德时代"),
 }
-_COMPANY_SOURCE_HINTS = {
-    "LG에너지솔루션": ("LG-REPORT.pdf",),
-    "CATL": ("CATL-REPORT.pdf",),
-}
-_GENERAL_SOURCE_HINTS = ("BATTERY-REPORT.pdf",)
 _STRATEGY_KEYWORDS = [
     (("ess", "energy storage", "모빌리티", "비ev", "non-ev"), "ESS 및 비EV 응용처 확대"),
     (("lfp", "ncm", "전고체", "solid-state", "chemistry"), "배터리 케미스트리 포트폴리오 다변화"),
@@ -71,19 +72,33 @@ def _build_company_queries(company: str, query: str) -> list[str]:
     ]
 
 
-def _safe_rag_search(query: str, top_k: int = 12) -> list[dict]:
+def _safe_rag_search(
+    query: str,
+    *,
+    top_k: int = 12,
+    metadata_filter: dict | None = None,
+) -> list[dict]:
     try:
-        return rag_search(query, top_k=top_k)
+        return rag_search(query, top_k=top_k, metadata_filter=metadata_filter)
     except Exception:
         return []
 
 
-def _run_rag_loop(query: str, top_k: int = 12) -> list[dict]:
+def _run_rag_loop(
+    company: str,
+    query: str,
+    top_k: int = 12,
+) -> list[dict]:
     current_query = query
     results: list[dict] = []
+    metadata_filter = build_company_filter(company)
 
     for _ in range(MAX_QUERY_REWRITE + 1):
-        results = _safe_rag_search(current_query, top_k=top_k)
+        results = _safe_rag_search(
+            current_query,
+            top_k=top_k,
+            metadata_filter=metadata_filter,
+        )
         if results:
             average_score = sum(item["score"] for item in results) / len(results)
             if average_score >= 0.65:
@@ -123,14 +138,15 @@ def _loaded_documents() -> tuple[dict, ...]:
 
 
 def _fallback_company_results(company: str, query: str, limit: int = 6) -> list[dict]:
-    preferred_sources = set(_COMPANY_SOURCE_HINTS.get(company, ()))
     aliases = _COMPANY_ALIASES.get(company, ())
     scoped_query = _strip_company_names(query, company)
     query_tokens = _tokenize(f"{company} {scoped_query}")
 
     ranked: list[dict] = []
     for document in _loaded_documents():
-        if document.get("source") not in preferred_sources:
+        if document.get("analysis_scope") != "company":
+            continue
+        if document.get("company") != company:
             continue
 
         chunk = document.get("text", "")
@@ -162,35 +178,26 @@ def _fallback_company_results(company: str, query: str, limit: int = 6) -> list[
 
 
 def _company_result_priority(company: str, result: dict) -> tuple[float, float]:
-    source = result.get("source", "")
     content = result.get("chunk", "")
     aliases = _COMPANY_ALIASES.get(company, ())
-    preferred_sources = _COMPANY_SOURCE_HINTS.get(company, ())
     competitor_aliases = tuple(
         alias
         for other_company, other_aliases in _COMPANY_ALIASES.items()
         if other_company != company
         for alias in (other_company.lower(), *other_aliases)
     )
-    competitor_sources = tuple(
-        hinted_source
-        for other_company, hinted_sources in _COMPANY_SOURCE_HINTS.items()
-        if other_company != company
-        for hinted_source in hinted_sources
-    )
 
     priority = float(result.get("score", 0.0))
-    lowered_source = source.lower()
+    result_company = result.get("company")
+    analysis_scope = result.get("analysis_scope")
 
-    if source in preferred_sources:
+    if analysis_scope == "company" and result_company == company:
         priority += 2.0
-    elif source in _GENERAL_SOURCE_HINTS:
-        priority += 0.2
 
-    if _matches_aliases(content, aliases) or _matches_aliases(lowered_source, aliases):
+    if _matches_aliases(content, aliases):
         priority += 1.2
 
-    if source in competitor_sources:
+    if result_company and result_company != company:
         priority -= 2.0
     if _matches_aliases(content, competitor_aliases):
         priority -= 1.5
@@ -204,39 +211,7 @@ def _select_company_results(company: str, results: list[dict]) -> list[dict]:
         key=lambda item: _company_result_priority(company, item),
         reverse=True,
     )
-
-    preferred_sources = _COMPANY_SOURCE_HINTS.get(company, ())
-    aliases = _COMPANY_ALIASES.get(company, ())
-    competitor_sources = {
-        hinted_source
-        for other_company, hinted_sources in _COMPANY_SOURCE_HINTS.items()
-        if other_company != company
-        for hinted_source in hinted_sources
-    }
-
-    primary = [
-        item
-        for item in ranked
-        if (
-            item.get("source") in preferred_sources
-            or _matches_aliases(item.get("chunk", ""), aliases)
-        )
-        and item.get("source") not in competitor_sources
-    ]
-    supporting = [
-        item
-        for item in ranked
-        if item not in primary and item.get("source") in _GENERAL_SOURCE_HINTS
-    ]
-
-    selected = primary[:8]
-    if len(selected) < 6:
-        selected.extend(supporting[: 6 - len(selected)])
-
-    if not selected:
-        selected = ranked[:8]
-
-    return selected[:8]
+    return ranked[:8]
 
 
 def _merge_company_results(
@@ -336,7 +311,7 @@ def company_analyst_node(state: ReportState) -> dict:
 
     실행 흐름:
     1. 기업별 전략 관련 쿼리 생성
-    2. RAG: pgvector에서 기업별 문서 검색 (관련도 < 0.65 → Rewrite, max 2회)
+    2. RAG: 대상 기업 문서 범위에서만 pgvector 검색 (관련도 < 0.65 → Rewrite, max 2회)
     3. 기업별 전략 진화 내러티브 생성 (과거→현재→미래)
     4. 비교 데이터 구조화
     5. State 기록 → Supervisor 반환
@@ -349,11 +324,12 @@ def company_analyst_node(state: ReportState) -> dict:
 
     raw_results: list[dict] = []
     for candidate_query in _build_company_queries(target, state["query"]):
-        raw_results.extend(_run_rag_loop(candidate_query))
+        raw_results.extend(_run_rag_loop(target, candidate_query))
     results = _select_company_results(target, raw_results)
-    preferred_sources = set(_COMPANY_SOURCE_HINTS.get(target, ()))
     preferred_count = sum(
-        1 for item in results if item.get("source") in preferred_sources
+        1
+        for item in results
+        if item.get("analysis_scope") == "company" and item.get("company") == target
     )
     if preferred_count < 4:
         fallback_results = _fallback_company_results(target, state["query"])
