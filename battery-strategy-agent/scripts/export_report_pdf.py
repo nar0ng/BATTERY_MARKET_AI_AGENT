@@ -14,13 +14,14 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
+    HRFlowable,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -60,39 +61,48 @@ def _build_styles(font_name: str) -> dict[str, ParagraphStyle]:
         "Body",
         parent=base_styles["BodyText"],
         fontName=font_name,
-        fontSize=10.5,
+        fontSize=10.2,
         leading=16,
         textColor=colors.HexColor("#1f2937"),
         wordWrap="CJK",
-        spaceAfter=6,
+        spaceAfter=7,
     )
     return {
+        "kicker": ParagraphStyle(
+            "Kicker",
+            parent=body,
+            fontSize=8.5,
+            leading=10,
+            alignment=TA_LEFT,
+            textColor=colors.HexColor("#475569"),
+            spaceAfter=4,
+        ),
         "title": ParagraphStyle(
             "Title",
             parent=body,
-            fontSize=20,
-            leading=26,
-            alignment=TA_CENTER,
+            fontSize=22,
+            leading=30,
+            alignment=TA_LEFT,
             textColor=colors.HexColor("#111827"),
-            spaceAfter=14,
+            spaceAfter=6,
         ),
         "h1": ParagraphStyle(
             "H1",
             parent=body,
-            fontSize=16,
+            fontSize=15.5,
             leading=22,
             textColor=colors.HexColor("#0f172a"),
-            spaceBefore=10,
-            spaceAfter=8,
+            spaceBefore=16,
+            spaceAfter=6,
         ),
         "h2": ParagraphStyle(
             "H2",
             parent=body,
-            fontSize=13,
+            fontSize=12.6,
             leading=18,
-            textColor=colors.HexColor("#1d4ed8"),
-            spaceBefore=8,
-            spaceAfter=6,
+            textColor=colors.HexColor("#1e3a8a"),
+            spaceBefore=10,
+            spaceAfter=5,
         ),
         "h3": ParagraphStyle(
             "H3",
@@ -100,70 +110,48 @@ def _build_styles(font_name: str) -> dict[str, ParagraphStyle]:
             fontSize=11.5,
             leading=16,
             textColor=colors.HexColor("#111827"),
-            spaceBefore=6,
+            spaceBefore=8,
             spaceAfter=4,
         ),
         "body": body,
         "bullet": ParagraphStyle(
             "Bullet",
             parent=body,
-            leftIndent=10,
-            firstLineIndent=-8,
-        ),
-        "footnote": ParagraphStyle(
-            "Footnote",
-            parent=body,
-            fontSize=9,
-            leading=13,
-            leftIndent=10,
+            leftIndent=14,
             firstLineIndent=-10,
-            textColor=colors.HexColor("#374151"),
+            spaceAfter=4,
+        ),
+        "numbered": ParagraphStyle(
+            "Numbered",
+            parent=body,
+            leftIndent=14,
+            firstLineIndent=-10,
+            spaceAfter=4,
+        ),
+        "quote": ParagraphStyle(
+            "Quote",
+            parent=body,
+            fontSize=9.6,
+            leading=14,
+            textColor=colors.HexColor("#334155"),
         ),
         "table": ParagraphStyle(
             "TableCell",
             parent=body,
-            fontSize=9.5,
-            leading=13,
+            fontSize=9.3,
+            leading=13.5,
         ),
     }
 
 
-def _extract_footnote_numbers(lines: list[str]) -> dict[str, int]:
-    mapping: dict[str, int] = {}
-    next_number = 1
-
-    for line in lines:
-        stripped = line.strip()
-        if re.match(r"^\[\^[^\]]+\]:", stripped):
-            continue
-        for match in re.finditer(r"\[\^([^\]]+)\]", line):
-            footnote_id = match.group(1)
-            if footnote_id not in mapping:
-                mapping[footnote_id] = next_number
-                next_number += 1
-
-    for line in lines:
-        match = re.match(r"^\[\^([^\]]+)\]:", line.strip())
-        if not match:
-            continue
-        footnote_id = match.group(1)
-        if footnote_id not in mapping:
-            mapping[footnote_id] = next_number
-            next_number += 1
-
-    return mapping
-
-
-def _format_inline(text: str, footnote_numbers: dict[str, int]) -> str:
+def _format_inline(text: str) -> str:
     formatted = escape(text)
     formatted = formatted.replace("&lt;br/&gt;", "<br/>").replace("&lt;br&gt;", "<br/>")
     formatted = re.sub(r"\*\*(.+?)\*\*", r"\1", formatted)
+    formatted = re.sub(r"\*(.+?)\*", r"\1", formatted)
     formatted = re.sub(r"`(.+?)`", r"\1", formatted)
-    formatted = re.sub(
-        r"\[\^([^\]]+)\]",
-        lambda match: f"<super>{footnote_numbers.get(match.group(1), '?')}</super>",
-        formatted,
-    )
+    formatted = re.sub(r"\[\^[^\]]+\]", "", formatted)
+    formatted = re.sub(r"\s*\[출처:\s*[^\]]+\]", "", formatted)
     return formatted
 
 
@@ -173,7 +161,14 @@ def _is_table_line(line: str) -> bool:
 
 
 def _is_table_divider(line: str) -> bool:
-    stripped = line.strip().strip("|").replace(":", "").replace("-", "").replace(" ", "")
+    stripped = (
+        line.strip()
+        .strip("|")
+        .replace("|", "")
+        .replace(":", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
     return stripped == ""
 
 
@@ -187,27 +182,62 @@ def _parse_table_rows(lines: list[str]) -> list[list[str]]:
     return rows
 
 
-def _table_flowable(rows: list[list[str]], styles: dict[str, ParagraphStyle], footnote_numbers: dict[str, int]) -> Table:
+def _title_block(title: str, styles: dict[str, ParagraphStyle]) -> list:
+    return [
+        Paragraph("BATTERY STRATEGY REPORT", styles["kicker"]),
+        Paragraph(title, styles["title"]),
+        HRFlowable(
+            width=42 * mm,
+            thickness=1.8,
+            color=colors.HexColor("#2563eb"),
+            spaceAfter=10,
+        ),
+    ]
+
+
+def _quote_flowable(text: str, styles: dict[str, ParagraphStyle]) -> Table:
+    quote = Table(
+        [[Paragraph(_format_inline(text), styles["quote"])]],
+        colWidths=[170 * mm],
+        hAlign="LEFT",
+    )
+    quote.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+                ("LINEBEFORE", (0, 0), (0, -1), 2.2, colors.HexColor("#94a3b8")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
+    return quote
+
+
+def _table_flowable(rows: list[list[str]], styles: dict[str, ParagraphStyle]) -> Table:
     table_rows = [
         [
-            Paragraph(_format_inline(cell, footnote_numbers), styles["table"])
+            Paragraph(_format_inline(cell), styles["table"])
             for cell in row
         ]
         for row in rows
     ]
-    table = Table(table_rows, repeatRows=1)
+    table = Table(table_rows, repeatRows=1, hAlign="LEFT")
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e5e7eb")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e2e8f0")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#9ca3af")),
+                ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.HexColor("#94a3b8")),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
             ]
         )
     )
@@ -218,14 +248,14 @@ def _page_number(canvas, doc) -> None:
     canvas.saveState()
     canvas.setFont("AppleGothic", 8)
     canvas.setFillColor(colors.HexColor("#6b7280"))
-    canvas.drawRightString(A4[0] - 18 * mm, 10 * mm, str(doc.page))
+    canvas.drawRightString(A4[0] - 20 * mm, 10 * mm, str(doc.page))
     canvas.restoreState()
 
 
 def _build_story(markdown_text: str, styles: dict[str, ParagraphStyle]) -> list:
     lines = markdown_text.splitlines()
-    footnote_numbers = _extract_footnote_numbers(lines)
     story: list = []
+    title_rendered = False
 
     index = 0
     while index < len(lines):
@@ -238,14 +268,6 @@ def _build_story(markdown_text: str, styles: dict[str, ParagraphStyle]) -> list:
 
         footnote_match = re.match(r"^\[\^([^\]]+)\]:\s*(.+)$", stripped)
         if footnote_match:
-            footnote_id, content = footnote_match.groups()
-            number = footnote_numbers.get(footnote_id, 0)
-            story.append(
-                Paragraph(
-                    f"{number}. {_format_inline(content, footnote_numbers)}",
-                    styles["footnote"],
-                )
-            )
             index += 1
             continue
 
@@ -256,16 +278,42 @@ def _build_story(markdown_text: str, styles: dict[str, ParagraphStyle]) -> list:
                 index += 1
             rows = _parse_table_rows(table_lines)
             if rows:
-                story.append(_table_flowable(rows, styles, footnote_numbers))
-                story.append(Spacer(1, 6))
+                story.append(_table_flowable(rows, styles))
+                story.append(Spacer(1, 8))
+            continue
+
+        if stripped.startswith(">"):
+            quote_lines: list[str] = []
+            while index < len(lines):
+                candidate = lines[index].strip()
+                if not candidate.startswith(">"):
+                    break
+                quote_lines.append(candidate.lstrip(">").strip())
+                index += 1
+            if quote_lines:
+                story.append(_quote_flowable(" ".join(quote_lines), styles))
+                story.append(Spacer(1, 8))
             continue
 
         heading_match = re.match(r"^(#{1,4})\s+(.+)$", stripped)
         if heading_match:
             level = len(heading_match.group(1))
-            title = _format_inline(heading_match.group(2), footnote_numbers)
-            style_key = {1: "title", 2: "h1", 3: "h2", 4: "h3"}.get(level, "body")
-            story.append(Paragraph(title, styles[style_key]))
+            title = _format_inline(heading_match.group(2))
+            if not title_rendered and level == 1:
+                story.extend(_title_block(title, styles))
+                title_rendered = True
+            else:
+                style_key = {1: "h1", 2: "h1", 3: "h2", 4: "h3"}.get(level, "body")
+                story.append(Paragraph(title, styles[style_key]))
+                if style_key == "h1":
+                    story.append(
+                        HRFlowable(
+                            width="100%",
+                            thickness=0.7,
+                            color=colors.HexColor("#cbd5e1"),
+                            spaceAfter=8,
+                        )
+                    )
             index += 1
             continue
 
@@ -273,7 +321,7 @@ def _build_story(markdown_text: str, styles: dict[str, ParagraphStyle]) -> list:
             bullet_text = re.sub(r"^[-*]\s+", "", stripped)
             story.append(
                 Paragraph(
-                    f"- {_format_inline(bullet_text, footnote_numbers)}",
+                    f"- {_format_inline(bullet_text)}",
                     styles["bullet"],
                 )
             )
@@ -283,8 +331,8 @@ def _build_story(markdown_text: str, styles: dict[str, ParagraphStyle]) -> list:
         if re.match(r"^\d+\.\s+", stripped):
             story.append(
                 Paragraph(
-                    _format_inline(stripped, footnote_numbers),
-                    styles["bullet"],
+                    _format_inline(stripped),
+                    styles["numbered"],
                 )
             )
             index += 1
@@ -298,6 +346,7 @@ def _build_story(markdown_text: str, styles: dict[str, ParagraphStyle]) -> list:
                 not candidate
                 or re.match(r"^(#{1,4})\s+(.+)$", candidate)
                 or re.match(r"^\[\^([^\]]+)\]:", candidate)
+                or candidate.startswith(">")
                 or re.match(r"^[-*]\s+", candidate)
                 or re.match(r"^\d+\.\s+", candidate)
                 or _is_table_line(candidate)
@@ -308,7 +357,7 @@ def _build_story(markdown_text: str, styles: dict[str, ParagraphStyle]) -> list:
 
         story.append(
             Paragraph(
-                _format_inline(" ".join(paragraph_lines), footnote_numbers),
+                _format_inline(" ".join(paragraph_lines)),
                 styles["body"],
             )
         )
@@ -325,9 +374,9 @@ def export_markdown_to_pdf(input_path: Path, output_path: Path) -> None:
     doc = SimpleDocTemplate(
         str(output_path),
         pagesize=A4,
-        leftMargin=18 * mm,
-        rightMargin=18 * mm,
-        topMargin=18 * mm,
+        leftMargin=20 * mm,
+        rightMargin=20 * mm,
+        topMargin=20 * mm,
         bottomMargin=16 * mm,
         title=input_path.stem,
     )

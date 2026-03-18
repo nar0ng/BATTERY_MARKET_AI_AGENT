@@ -157,6 +157,28 @@ def _normalize_blank_lines(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text.strip())
 
 
+def _strip_reference_footnotes(text: str) -> str:
+    return re.split(r"\n## 각주\b", text or "", maxsplit=1)[0].strip()
+
+
+def _strip_citation_marks(text: str) -> str:
+    cleaned = re.sub(r"\[\^[^\]]+\]", "", text or "")
+    cleaned = re.sub(r"\s*\[출처:\s*[^\]]+\]", "", cleaned)
+    cleaned = re.sub(r" {2,}", " ", cleaned)
+    cleaned = re.sub(r" +\n", "\n", cleaned)
+    return _normalize_blank_lines(cleaned)
+
+
+def _prepare_sections_for_delivery(sections: dict[str, str]) -> dict[str, str]:
+    prepared: dict[str, str] = {}
+    for heading, body in sections.items():
+        cleaned = body.strip()
+        if heading == "REFERENCE":
+            cleaned = _strip_reference_footnotes(cleaned)
+        prepared[heading] = _strip_citation_marks(cleaned)
+    return prepared
+
+
 def _polish_list_spacing(text: str) -> str:
     lines = text.splitlines()
     polished: list[str] = []
@@ -250,20 +272,11 @@ def _compose_readable_body(sections: dict[str, str]) -> str:
 
 
 def _build_final_report_title(query: str) -> str:
-    cleaned = re.sub(r"\s+", " ", (query or "").strip())
-    cleaned = re.sub(r"(해줘|해주세요|비교해줘|분석해줘|평가해줘)\s*$", "", cleaned).strip(" ?.")
-
-    if "LG에너지솔루션" in cleaned and "CATL" in cleaned and "캐즘" in cleaned:
-        return "전기차 캐즘 국면 배터리 전략 비교 보고서"
-    if "LG에너지솔루션" in cleaned and "CATL" in cleaned:
-        return "LG에너지솔루션 vs CATL 전략 비교 보고서"
-    if len(cleaned) > 40:
-        cleaned = cleaned[:40].rstrip() + "..."
-    return f"{cleaned or '배터리 전략 분석'} 보고서"
+    return "배터리 시장 전략 분석 보고서"
 
 
 def _render_final_section_heading(index: int, section: str) -> str:
-    return f"# {index}. {section}"
+    return f"## {index}. {section}"
 
 
 def _message_content_to_text(content) -> str:
@@ -315,6 +328,7 @@ def _compose_final_report(state: ReportState, quality_result: dict) -> tuple[str
     sections = _extract_sections(report_draft)
     sections = _heuristic_polish_sections(sections)
     sections, llm_calls = _llm_polish_sections(sections)
+    sections = _prepare_sections_for_delivery(sections)
 
     final_parts: list[str] = [f"# {_build_final_report_title(state.get('query', ''))}"]
     for index, section in enumerate(REQUIRED_SECTIONS, start=1):

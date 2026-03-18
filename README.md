@@ -17,6 +17,7 @@
 - 초기 단계에서 시장 분석 1개와 기업 분석 2개(LG에너지솔루션, CATL)를 병렬로 실행하고, 이후 SWOT 추출과 보고서 작성은 순차적으로 이어진다.
 - Supervisor는 단순 라우터가 아니라 `quality_checked`, `iteration_count`, `llm_call_count`, `web_search_count`를 기준으로 종료 조건과 재시도 여부를 함께 통제한다.
 - 품질 게이트에서 실패한 항목이 있으면 원인 Agent만 재호출하도록 설계되어 전체 파이프라인을 처음부터 다시 실행하지 않는다.
+- 즉 `swot_extractor -> report_writer`는 데이터 의존 순서를 뜻할 뿐, 제어권은 항상 Supervisor가 가진다.
 ### 3-2. 시장 분석 에이전트 고려사항
 - (예시) 과거 / 현재 / 미래 를 기준으로 한 시장 변의 추정
 - 사용자 질의를 그대로 쓰지 않고 시장 배경, 공급망, 정책 변화, 수요 둔화, 미래 전망 등으로 세분화한 다중 질의를 생성한다.
@@ -41,7 +42,8 @@
 - 보고서 작성 Agent는 새로운 검색을 수행하지 않고, 앞선 Agent가 만든 상태값만 조립해 초안을 작성한다.
 - 필수 섹션은 `SUMMARY`, `시장 배경`, `기업별 포트폴리오 다각화 전략 및 핵심 경쟁력`, `핵심 전략 비교 및 SWOT 분석`, `종합 시사점`, `REFERENCE`로 고정한다.
 - SUMMARY는 최대 300단어 이내로 제한하고, 본문은 과거-현재-미래 흐름과 출처 연결을 유지하도록 작성한다.
-- REFERENCE는 기관 보고서, 학술 논문, 웹페이지 형식으로 자동 포맷팅되며, 기업 분석과 SWOT에는 각주 기반 출처 표기를 추가한다.
+- `report_draft` 단계에서는 각주 마커와 참고문헌이 유지될 수 있지만, 최종 전달용 `final_report`는 각주 블록 없이 더 읽기 쉬운 형태로 정리된다.
+- REFERENCE는 기관 보고서, 학술 논문, 웹페이지 형식으로 자동 포맷팅된다.
 - 최종 산출물은 `report_writer` 초안을 Supervisor가 다시 검토해 필수 섹션 존재, 요약 길이, 참고문헌 형식, SWOT 분류 정확성, 시간축 포함 여부, 웹 검색 균형 여부까지 확인한 뒤 확정된다.
 
 ## 4. Tech Stack 
@@ -81,26 +83,33 @@
 
 LangGraph 워크플로우는 Supervisor를 중심으로 한 허브 앤 스포크 구조로 구현되어 있다.
 
-![배터리 전략 분석 Agent 아키텍처](imgs/architecture.png)
-
 ```text
 Supervisor
   ├─ market_analyst
   ├─ company_analyst (LG에너지솔루션)
   ├─ company_analyst (CATL)
-  └─> swot_extractor
-       └─> report_writer
-            └─> Supervisor quality check
-                 └─> final_report or retry
+  └─ wait until parallel jobs complete
+Supervisor
+  └─ swot_extractor
+Supervisor
+  └─ report_writer
+Supervisor
+  └─ quality check
+       ├─ pass -> final_report
+       └─ fail -> retry target agent
 ```
+
+- 위 다이어그램에서 핵심은 각 작업 노드가 서로를 직접 호출하지 않고, 항상 Supervisor를 거쳐 다음 단계로 넘어간다는 점이다.
+- 즉 실행 순서는 `market/company 병렬 -> swot_extractor -> report_writer -> quality check`이지만, 제어 구조는 끝까지 Hub-and-Spoke다.
 
 ### 7-1. 그래프를 기준으로 한 배터리 시장 전략 분석 Agent 흐름
 1. 사용자 질의로 초기 상태를 생성하고 Supervisor가 첫 라우팅을 결정한다.
 2. 시장 분석 Agent와 기업 분석 Agent 2개가 병렬 실행되어 시장 근거와 기업별 전략 근거를 수집한다.
 3. 두 기업 분석이 완료되면 Supervisor가 비교 데이터(`comparison_data`)를 생성한다.
 4. SWOT Agent가 기업 분석 결과와 시장 배경을 조합해 LG에너지솔루션과 CATL의 SWOT을 추출하고 내부/외부 분류를 검증한다.
-5. 보고서 작성 Agent가 모든 결과를 종합해 필수 섹션과 참고문헌, 각주가 포함된 `report_draft`를 생성한다.
-6. Supervisor가 품질 게이트를 수행해 통과 시 `final_report`를 확정하고, 실패 시 원인 Agent만 재호출한다.
+5. 보고서 작성 Agent가 모든 결과를 종합해 필수 섹션과 참고문헌이 포함된 `report_draft`를 생성한다.
+6. Supervisor가 품질 게이트를 수행하고, 통과 시 전달용 `final_report`를 정리해 확정한다.
+7. 품질 게이트 실패 시에는 전체를 재실행하지 않고 원인 Agent만 재호출한다.
 
 ## 8. 디렉토리 구조
 ```text
@@ -138,7 +147,7 @@ battery-strategy-agent/
 - `기업별 포트폴리오 다각화 전략 및 핵심 경쟁력`: LG에너지솔루션, CATL 각각의 과거-현재-미래 전략과 리스크
 - `핵심 전략 비교 및 SWOT 분석`: 비교 표, 기업별 SWOT, 전략 차이 요약
 - `종합 시사점`: 의사결정 관점의 핵심 해석 포인트
-- `REFERENCE`: 자동 포맷된 참고문헌과 각주
+- `REFERENCE`: 자동 포맷된 참고문헌
 
 추가로 `scripts/export_report_pdf.py`를 사용하면 Markdown 보고서를 스타일이 적용된 PDF로 변환할 수 있다.
 

@@ -804,10 +804,11 @@ def _render_company_swot_table(
 ) -> str:
     return "\n".join(
         [
-            "| Strength | Weakness |",
+            "| Strength (강점) | Weakness (약점) |",
             "|---|---|",
             f"| {_render_swot_table_cell('S', swot_data.get('S', []), ref_ids, reference_lookup)} | {_render_swot_table_cell('W', swot_data.get('W', []), ref_ids, reference_lookup)} |",
-            "| Opportunity | Threat |",
+            "",
+            "| Opportunity (기회) | Threat (위협) |",
             "|---|---|",
             f"| {_render_swot_table_cell('O', swot_data.get('O', []), ref_ids, reference_lookup)} | {_render_swot_table_cell('T', swot_data.get('T', []), ref_ids, reference_lookup)} |",
         ]
