@@ -156,6 +156,7 @@ def _extract_footnote_numbers(lines: list[str]) -> dict[str, int]:
 
 def _format_inline(text: str, footnote_numbers: dict[str, int]) -> str:
     formatted = escape(text)
+    formatted = formatted.replace("&lt;br/&gt;", "<br/>").replace("&lt;br&gt;", "<br/>")
     formatted = re.sub(r"\*\*(.+?)\*\*", r"\1", formatted)
     formatted = re.sub(r"`(.+?)`", r"\1", formatted)
     formatted = re.sub(
